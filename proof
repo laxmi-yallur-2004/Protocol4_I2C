@@ -1,0 +1,46 @@
+
+
+
+[LOG 1 - Normal + Unplugged Device - PASS]
+
+Protocol 4 I2C Master Ready - No delay()
+-> Bus Recovery Started
+PASS: Bus recovered
+
+--- Sending: 1
+START OK
+NACK - Device unplugged?
+PASS: NACK handling - Unplugged device
+STOP OK
+
+--- Sending: 2
+START OK
+NACK - Device unplugged?
+PASS: NACK handling - Unplugged device
+STOP OK
+
+[LOG 2 - Stuck Bus Fault + Recovery - PASS]
+
+--- Sending: 3
+START OK
+ACK OK
+ACK OK
+Repeated START demo
+FAIL: Bus stuck SDA low / SCL low
+-> Bus Recovery Started
+PASS: Bus recovered
+NACK - Device unplugged?
+STOP OK
+PASS: Cycle complete
+
+--- Sending: 4
+START OK
+NACK - Device unplugged?
+PASS: NACK handling - Unplugged device
+STOP OK
+
+FAULT INJECTION NOTE:
+Fault created by connecting SDA -> GND with jumper wire
+as per sheet requirement "stuck bus scenario"
+
+RESULT FOR BOTH: PASS - Master did not hang, recovered.
