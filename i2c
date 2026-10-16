@@ -1,4 +1,4 @@
-// Protocol 4 - Robust I2C Master - NO delay() used
+
 // SDA=A4, SCL=A5
 #define SDA_PIN A4
 #define SCL_PIN A5
