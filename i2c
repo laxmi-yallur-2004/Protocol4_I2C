@@ -1,0 +1,119 @@
+// Protocol 4 - Robust I2C Master - NO delay() used
+// SDA=A4, SCL=A5
+#define SDA_PIN A4
+#define SCL_PIN A5
+#define TIMEOUT_MS 50
+#define SDA_LOW_TIMEOUT 5000
+
+#define SDA_HIGH() pinMode(SDA_PIN, INPUT_PULLUP)
+#define SDA_LOW()  { pinMode(SDA_PIN, OUTPUT); digitalWrite(SDA_PIN, LOW); }
+#define SCL_HIGH() pinMode(SCL_PIN, INPUT_PULLUP)
+#define SCL_LOW()  { pinMode(SCL_PIN, OUTPUT); digitalWrite(SCL_PIN, LOW); }
+#define SDA_READ() digitalRead(SDA_PIN)
+#define SCL_READ() digitalRead(SCL_PIN)
+
+unsigned long lastSend = 0;
+int val = 1;
+
+bool waitSCLHigh() {
+  unsigned long start = millis();
+  SCL_HIGH();
+  while (!SCL_READ()) {
+    if (millis() - start > TIMEOUT_MS) {
+      Serial.println("FAIL: Clock stretching timeout - SCL stuck low");
+      return false;
+    }
+  }
+  return true;
+}
+
+bool busRecovery() {
+  Serial.println("-> Bus Recovery Started");
+  for (int i = 0; i < 9; i++) {
+    SCL_LOW(); delayMicroseconds(10);
+    SCL_HIGH();
+    if (!waitSCLHigh()) return false;
+    delayMicroseconds(10);
+  }
+  SDA_LOW(); delayMicroseconds(5);
+  SCL_HIGH(); waitSCLHigh(); delayMicroseconds(5);
+  SDA_HIGH(); delayMicroseconds(5);
+  Serial.println(SDA_READ() && SCL_READ() ? "PASS: Bus recovered" : "FAIL: Bus still stuck");
+  return SDA_READ() && SCL_READ();
+}
+
+bool i2c_start() {
+  unsigned long start = millis();
+  while (!SDA_READ() || !SCL_READ()) {
+    if (millis() - start > SDA_LOW_TIMEOUT) {
+      Serial.println("FAIL: Bus stuck SDA low / SCL low");
+      return busRecovery();
+    }
+  }
+  SDA_HIGH(); if(!waitSCLHigh()) return false; delayMicroseconds(5);
+  SDA_LOW(); delayMicroseconds(5);
+  SCL_LOW();
+  Serial.println("START OK");
+  return true;
+}
+
+void i2c_stop() {
+  SDA_LOW(); delayMicroseconds(5);
+  if(!waitSCLHigh()) { busRecovery(); return; }
+  delayMicroseconds(5);
+  SDA_HIGH(); delayMicroseconds(5);
+  Serial.println("STOP OK");
+}
+
+bool i2c_writeByte(byte data, bool *ack) {
+  for (int i = 7; i >= 0; i--) {
+    if (data & (1 << i)) SDA_HIGH(); else SDA_LOW();
+    delayMicroseconds(5);
+    SCL_HIGH(); 
+    if (!waitSCLHigh()) return false;
+    delayMicroseconds(5);
+    SCL_LOW(); delayMicroseconds(5);
+  }
+  SDA_HIGH(); delayMicroseconds(5);
+  SCL_HIGH(); 
+  if (!waitSCLHigh()) return false;
+  *ack = !SDA_READ();
+  Serial.println(*ack ? "ACK OK" : "NACK - Device unplugged?");
+  SCL_LOW(); delayMicroseconds(5);
+  return true;
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, INPUT_PULLUP);
+  Serial.println("Protocol 4 I2C Master Ready - No delay()");
+  busRecovery();
+  lastSend = millis();
+}
+
+void loop() {
+  if (millis() - lastSend < 2000) return; // non-blocking 2 sec gap
+  lastSend = millis();
+
+  bool ack;
+  Serial.print("\n--- Sending: "); Serial.println(val);
+  
+  if (!i2c_start()) return;
+  if (!i2c_writeByte(0xA0, &ack)) { i2c_stop(); return; }
+  
+  if (!ack) {
+    Serial.println("PASS: NACK handling - Unplugged device");
+    i2c_stop();
+    val++; if(val>7) val=1;
+    return;
+  }
+  
+  i2c_writeByte(val, &ack);
+  Serial.println("Repeated START demo");
+  i2c_start(); 
+  i2c_writeByte(0xA1, &ack);
+  i2c_stop();
+  Serial.println("PASS: Cycle complete");
+  val++; if(val>7) val=1;
+}
