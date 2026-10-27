@@ -1,137 +1,57 @@
-# Protocol 4: I2C (SDA / SCL)
+# I2C Master Driver -(Protocol 4)
 
-## Goal
-An I2C master driver (bit-banged) with:
-- Timeouts on every wait
-- Bus recovery (SCL toggling / soft reset approach)
-- NACK handling
-- Demonstrated recovery from an unplugged device and a stuck bus scenario
+I2C master driver with:
 
----
+- **Timeouts everywhere:** The data read waits at most 100 ms. If 2 bytes are not received, it is reported as `I2C: FAIL TIMEOUT`.
+- **Bus recovery (SCL toggling / soft reset approach):** `I2C_BusRecovery()` stops the bus, toggles SCL 9 times, then restarts the bus.
+- **NACK handling:** When the PSU does not acknowledge (NACK), the LCD shows `ERR 3` for voltage and current, and `I2C: FAIL NACK`.
 
-## Concepts Covered (Must Learn)
+The final result is **PASS** only when the I2C communication works and the readings are in range.
 
-1. **START / STOP / Repeated START**
-   - START: SDA goes high to low while SCL is high
-   - STOP: SDA goes low to high while SCL is high
-   - Repeated START: a new START without a STOP in between
-2. **ACK / NACK**
-   - After 8 data bits, the receiver pulls SDA low on the 9th clock for ACK
-   - SDA left high on the 9th clock means NACK
-3. **Clock stretching awareness**
-   - A slave can hold SCL low to slow the master down
-   - The master must wait for SCL to go high, with a timeout
-4. **Arbitration concept (even if single master)**
-   - If two masters drive the bus at the same time, each one checks SDA while sending
-   - A master that sends a 1 but reads a 0 has lost arbitration and must stop driving the bus
-   - This project has a single master, so arbitration is never triggered; it is explained for understanding only
-5. **Bus stuck conditions and recovery**
-   - A slave can hold SDA low in the middle of a byte after a reset or glitch
-   - Fix: toggle SCL up to 9 times until SDA is released, then send a STOP
-6. **Timeouts for every wait**
-   - No wait loop can run forever
+## How it works
 
----
+1. Turns the PSU ON using pin `PA2` and waits 5 seconds.
+2. Every 1 second, reads voltage (`0x8B`) and current (`0x8C`) from the PSU at I2C address `0x03`.
+3. If a read fails (NACK, timeout, bus error), the bus is recovered automatically.
+4. Shows the readings and the PASS/FAIL result on the LCD.
 
-## How the Code Covers Each Requirement
+## Connections
 
-1. **START / STOP / Repeated START**
-   - Implemented in `i2c_start()`, `i2c_stop()` and the repeated START demo in `loop()`
-   - Log: `START OK`, `STOP OK`, `Repeated START demo`
+| Signal | Pin |
+|--------|-----|
+| I2C SDA | `PB11` |
+| I2C SCL | `PB10` |
+| PSU ON | `PA2` |
+| LCD backlight | `PA11` |
+| LCD (RS, RW, E) | `PC8`, `PC9`, `PC10` |
+| LCD data (D0-D7) | `PC0` - `PC7` |
 
-2. **Clock stretching awareness**
-   - Implemented in `waitSCLHigh()`
-   - Log: `FAIL: Clock stretching timeout - SCL stuck low`
+## Pass limits
 
-3. **Stuck bus (SDA/SCL low) and recovery**
-   - `i2c_start()` checks `SDA_READ()` / `SCL_READ()` before starting
-   - `busRecovery()` sends up to 9 clock pulses
-   - Log: `FAIL: Bus stuck SDA low / SCL low` -> `PASS: Bus recovered`
+- Voltage: 22.0 V to 28.0 V
+- Current: 0.05 A or more
+- I2C: voltage and current must both be read OK
 
-4. **Timeouts on every wait**
-   - `TIMEOUT_MS = 50` for SCL
-   - `SDA_LOW_TIMEOUT = 5000`
-   - No `delay()`, only `millis()` and `delayMicroseconds(5)`
+## LCD output
 
-5. **NACK handling**
-   - `i2c_writeByte()` checks ACK on the 9th clock
-   - Log: `NACK - Device unplugged?`
-
-6. **Recovery from unplugged device**
-   - NACK is detected, STOP is issued, master continues
-   - Log: `PASS: NACK handling - Unplugged device`
-
----
-
-## Hardware Setup
-- Arduino board + USB cable only
-- No I2C device is needed: "unplugged device" means nothing is on the bus
-- Pull-ups on SDA and SCL (internal pull-ups, or external 4.7k for real hardware)
-
----
-
-## Output Proof
-
-### Log 1: Normal + Unplugged Device (PASS)
+**PASS (device connected)**
 
 ```
-Protocol 4 I2C Master Ready - No delay()
--> Bus Recovery Started
-PASS: Bus recovered
-
---- Sending: 1
-START OK
-NACK - Device unplugged?
-PASS: NACK handling - Unplugged device
-STOP OK
-
---- Sending: 2
-START OK
-NACK - Device unplugged?
-PASS: NACK handling - Unplugged device
-STOP OK
+Voltage: 24.73 V
+Current: 0.27 A
+I2C: PASS ACK OK
+TEST: PASS
 ```
 
-### Log 2: Stuck Bus Fault + Recovery (PASS)
+**FAIL (device not responding / unplugged)**
 
 ```
---- Sending: 3
-START OK
-ACK OK
-ACK OK
-Repeated START demo
-FAIL: Bus stuck SDA low / SCL low
--> Bus Recovery Started
-PASS: Bus recovered
-NACK - Device unplugged?
-STOP OK
-PASS: Cycle complete
-
---- Sending: 4
-START OK
-NACK - Device unplugged?
-PASS: NACK handling - Unplugged device
-STOP OK
+Voltage: ERR 3
+Current: ERR 3
+I2C: FAIL NACK
+TEST: FAIL COMM
 ```
 
-### Fault Injection
-1. Connect SDA to GND with a jumper wire while the program is running (stuck bus scenario)
-2. The master detects the stuck bus and starts recovery
-3. Remove the jumper wire
-4. Recovery succeeds (`PASS: Bus recovered`) and normal transfers continue
+## Libraries
 
-Note: the `ACK OK` lines in Log 2 appear because SDA is held low by the jumper wire, so the master reads a low level on the 9th clock. This is a side effect of the fault injection, not a real device.
-
-### Fault Still Present (Extra Case)
-- If the jumper stays connected, recovery times out with `FAIL: Clock stretching timeout - SCL stuck low`
-- The master does not hang: each attempt returns in about 50 ms and retries
-- `PASS: Bus recovered` is never printed while the line is still held low
-
----
-
-## Result
-
-**PASS.** The master never hangs and recovers from every fault:
-- Stuck bus (recovered after the fault is removed)
-- Clock stretching timeout
-- NACK from a missing device
+`Wire`, `LiquidCrystal`
