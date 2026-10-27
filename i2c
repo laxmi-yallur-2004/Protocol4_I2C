@@ -1,119 +1,138 @@
+#include <Wire.h>
+#include <LiquidCrystal.h>
 
-// SDA=A4, SCL=A5
-#define SDA_PIN A4
-#define SCL_PIN A5
-#define TIMEOUT_MS 50
-#define SDA_LOW_TIMEOUT 5000
+TwoWire ConverterBus(PB11, PB10);
 
-#define SDA_HIGH() pinMode(SDA_PIN, INPUT_PULLUP)
-#define SDA_LOW()  { pinMode(SDA_PIN, OUTPUT); digitalWrite(SDA_PIN, LOW); }
-#define SCL_HIGH() pinMode(SCL_PIN, INPUT_PULLUP)
-#define SCL_LOW()  { pinMode(SCL_PIN, OUTPUT); digitalWrite(SCL_PIN, LOW); }
-#define SDA_READ() digitalRead(SDA_PIN)
-#define SCL_READ() digitalRead(SCL_PIN)
+LiquidCrystal lcd(
+  PC8, PC9, PC10,
+  PC0, PC1, PC2, PC3,
+  PC4, PC5, PC6, PC7
+);
 
-unsigned long lastSend = 0;
-int val = 1;
+const uint8_t LCD_BACKLIGHT = PA11;
+const uint8_t DC1_PS_ON = PA2;
 
-bool waitSCLHigh() {
-  unsigned long start = millis();
-  SCL_HIGH();
-  while (!SCL_READ()) {
-    if (millis() - start > TIMEOUT_MS) {
-      Serial.println("FAIL: Clock stretching timeout - SCL stuck low");
-      return false;
+const uint8_t PSU_ADDR[1] = {0x03};
+
+struct Reading {
+  bool valid;
+  float value;
+  uint8_t txError;
+  uint8_t bytes;
+};
+
+const float V_MIN = 22.0;
+const float V_MAX = 28.0;
+const float I_MIN = 0.05;
+
+void I2C_BusRecovery() {
+  ConverterBus.end();
+  pinMode(PB10, OUTPUT);
+  pinMode(PB11, INPUT_PULLUP);
+  for(int i=0;i<9;i++){
+    digitalWrite(PB10, HIGH); delayMicroseconds(10);
+    digitalWrite(PB10, LOW); delayMicroseconds(10);
+  }
+  pinMode(PB10, INPUT_PULLUP);
+  delay(5);
+  ConverterBus.begin();
+  ConverterBus.setClock(100000);
+}
+
+Reading readPMBus(uint8_t address, uint8_t command) {
+  Reading r = {false, 0.0f, 0, 0};
+  ConverterBus.beginTransmission(address);
+  ConverterBus.write(command);
+  r.txError = ConverterBus.endTransmission(false);
+  if (r.txError != 0) {
+    if(r.txError == 3 || r.txError == 4) I2C_BusRecovery();
+    return r;
+  }
+  uint32_t t0 = millis();
+  while((millis()-t0) < 100){
+    r.bytes = ConverterBus.requestFrom(address, (uint8_t)2);
+    if(r.bytes == 2) break;
+    delay(1);
+  }
+  if (r.bytes == 2 && ConverterBus.available() >= 2) {
+    uint8_t lowByte = ConverterBus.read();
+    uint8_t highByte = ConverterBus.read();
+    uint16_t raw = ((uint16_t)highByte << 8) | lowByte;
+    if (raw != 0xFFFF && raw != 0x0000) {
+      r.value = raw * 0.01f;
+      r.valid = true;
     }
+  } else {
+    if(r.bytes != 2) I2C_BusRecovery();
   }
-  return true;
-}
-
-bool busRecovery() {
-  Serial.println("-> Bus Recovery Started");
-  for (int i = 0; i < 9; i++) {
-    SCL_LOW(); delayMicroseconds(10);
-    SCL_HIGH();
-    if (!waitSCLHigh()) return false;
-    delayMicroseconds(10);
-  }
-  SDA_LOW(); delayMicroseconds(5);
-  SCL_HIGH(); waitSCLHigh(); delayMicroseconds(5);
-  SDA_HIGH(); delayMicroseconds(5);
-  Serial.println(SDA_READ() && SCL_READ() ? "PASS: Bus recovered" : "FAIL: Bus still stuck");
-  return SDA_READ() && SCL_READ();
-}
-
-bool i2c_start() {
-  unsigned long start = millis();
-  while (!SDA_READ() || !SCL_READ()) {
-    if (millis() - start > SDA_LOW_TIMEOUT) {
-      Serial.println("FAIL: Bus stuck SDA low / SCL low");
-      return busRecovery();
-    }
-  }
-  SDA_HIGH(); if(!waitSCLHigh()) return false; delayMicroseconds(5);
-  SDA_LOW(); delayMicroseconds(5);
-  SCL_LOW();
-  Serial.println("START OK");
-  return true;
-}
-
-void i2c_stop() {
-  SDA_LOW(); delayMicroseconds(5);
-  if(!waitSCLHigh()) { busRecovery(); return; }
-  delayMicroseconds(5);
-  SDA_HIGH(); delayMicroseconds(5);
-  Serial.println("STOP OK");
-}
-
-bool i2c_writeByte(byte data, bool *ack) {
-  for (int i = 7; i >= 0; i--) {
-    if (data & (1 << i)) SDA_HIGH(); else SDA_LOW();
-    delayMicroseconds(5);
-    SCL_HIGH(); 
-    if (!waitSCLHigh()) return false;
-    delayMicroseconds(5);
-    SCL_LOW(); delayMicroseconds(5);
-  }
-  SDA_HIGH(); delayMicroseconds(5);
-  SCL_HIGH(); 
-  if (!waitSCLHigh()) return false;
-  *ack = !SDA_READ();
-  Serial.println(*ack ? "ACK OK" : "NACK - Device unplugged?");
-  SCL_LOW(); delayMicroseconds(5);
-  return true;
+  while (ConverterBus.available()) ConverterBus.read();
+  return r;
 }
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(SDA_PIN, INPUT_PULLUP);
-  pinMode(SCL_PIN, INPUT_PULLUP);
-  Serial.println("Protocol 4 I2C Master Ready - No delay()");
-  busRecovery();
-  lastSend = millis();
+  lcd.begin(20, 4);
+  pinMode(LCD_BACKLIGHT, OUTPUT);
+  digitalWrite(LCD_BACKLIGHT, HIGH);
+  digitalWrite(DC1_PS_ON, LOW);
+  pinMode(DC1_PS_ON, OUTPUT);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Starting...");
+  digitalWrite(DC1_PS_ON, HIGH);
+  delay(5000);
+  ConverterBus.begin();
+  ConverterBus.setClock(100000);
 }
 
 void loop() {
-  if (millis() - lastSend < 2000) return; // non-blocking 2 sec gap
-  lastSend = millis();
+  Reading voltage = readPMBus(PSU_ADDR[0], 0x8B);
+  delay(20);
+  Reading current = readPMBus(PSU_ADDR[0], 0x8C);
 
-  bool ack;
-  Serial.print("\n--- Sending: "); Serial.println(val);
-  
-  if (!i2c_start()) return;
-  if (!i2c_writeByte(0xA0, &ack)) { i2c_stop(); return; }
-  
-  if (!ack) {
-    Serial.println("PASS: NACK handling - Unplugged device");
-    i2c_stop();
-    val++; if(val>7) val=1;
-    return;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Voltage: ");
+  if (voltage.valid) {
+    lcd.print(voltage.value, 2);
+    lcd.print(" V");
+  } else {
+    lcd.print("ERR ");
+    lcd.print(voltage.txError);
   }
-  
-  i2c_writeByte(val, &ack);
-  Serial.println("Repeated START demo");
-  i2c_start(); 
-  i2c_writeByte(0xA1, &ack);
-  i2c_stop();
-  Serial.println("PASS: Cycle complete");
-  val++; if(val>7) val=1;
+
+  lcd.setCursor(0, 1);
+  lcd.print("Current: ");
+  if (current.valid) {
+    lcd.print(current.value, 2);
+    lcd.print(" A");
+  } else {
+    lcd.print("ERR ");
+    lcd.print(current.txError);
+  }
+
+  lcd.setCursor(0, 2);
+  if(!voltage.valid || !current.valid){
+    lcd.print("I2C: FAIL ");
+    if(voltage.txError==3 || current.txError==3) lcd.print("NACK");
+    else if(voltage.bytes!=2 || current.bytes!=2) lcd.print("TIMEOUT");
+    else lcd.print("BUS ERR");
+  } else {
+    lcd.print("I2C: PASS ACK OK");
+  }
+
+  lcd.setCursor(0, 3);
+  bool comm_ok = voltage.valid && current.valid;
+  bool volt_ok = comm_ok && voltage.value >= V_MIN && voltage.value <= V_MAX;
+  bool curr_ok = comm_ok && current.value >= I_MIN;
+
+  if(comm_ok && volt_ok && curr_ok){
+    lcd.print("TEST: PASS");
+  } else {
+    lcd.print("TEST: FAIL ");
+    if(!comm_ok) lcd.print("COMM");
+    else if(!volt_ok) lcd.print("VOLT");
+    else lcd.print("CURR");
+  }
+
+  delay(1000);
 }
